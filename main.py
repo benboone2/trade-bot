@@ -1,63 +1,89 @@
 """
-Connection test — verifies the Alpaca connector is wired up correctly.
+Main runner — evaluates signals against a watchlist and places orders
+when the market is open. Safe to run anytime; execution is gated on
+market hours.
+
 Run with: python main.py
 """
 
-import os
 from decimal import Decimal
-
 from dotenv import load_dotenv
 
 load_dotenv()
 
 from connectors import AlpacaConnector
-from connectors.base import OrderSide, OrderType
+from oms import OMS
+from risk import RiskConfig, RiskManager
+from signals import RSISignal, MACrossoverSignal, SignalEngine
+
+WATCHLIST = ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA"]
+
+
+def is_market_open(connector: AlpacaConnector) -> bool:
+    quote = connector.get_latest_quote("AAPL")
+    return quote["ask_price"] is not None and quote["ask_price"] > 0
 
 
 def main():
     connector = AlpacaConnector()
+    risk = RiskManager(connector)
+    oms = OMS(connector, risk=risk)
 
+    # --- Cancel any leftover open orders ---
+    open_orders = connector.get_open_orders()
+    if open_orders:
+        print(f"Cancelling {len(open_orders)} leftover open order(s)...")
+        oms.cancel_all_orders()
+
+    # --- Account snapshot ---
+    summary = oms.get_summary()
+    rs = risk.get_status()
     print("=== Account ===")
-    acct = connector.get_account()
-    print(f"  ID:             {acct.id}")
-    print(f"  Paper trading:  {acct.paper}")
-    print(f"  Cash:           ${acct.cash:,.2f}")
-    print(f"  Buying power:   ${acct.buying_power:,.2f}")
-    print(f"  Portfolio value:${acct.portfolio_value:,.2f}")
+    print(f"  Equity:      ${summary['equity']:,.2f}")
+    print(f"  Cash:        ${summary['cash']:,.2f}")
+    print(f"  Drawdown:    {rs['drawdown_pct']:.2%}  (limit {rs['limits']['max_drawdown_pct']:.0%})")
+    print(f"  Daily loss:  {rs['daily_loss_pct']:.2%}  (limit {rs['limits']['max_daily_loss_pct']:.0%})")
 
+    if rs["halted"]:
+        print(f"\n  TRADING HALTED: {rs['halt_reason']}")
+        return
+
+    market_open = is_market_open(connector)
+    print(f"\n  Market open: {'Yes' if market_open else 'No — signals will evaluate but no orders placed'}")
+
+    # --- Build signal engine ---
+    signals = [
+        RSISignal(connector, period=14, oversold=30, overbought=70),
+        MACrossoverSignal(connector, fast_period=20, slow_period=50),
+    ]
+    engine = SignalEngine(
+        signals=signals,
+        watchlist=WATCHLIST,
+        oms=oms,
+        default_qty=Decimal("1"),
+        min_confidence=0.1,
+    )
+
+    # --- Evaluate ---
+    print(f"\n=== Signal Scan ({len(WATCHLIST)} symbols, {len(signals)} signals) ===")
+    results = engine.run_once(execute=market_open)
+
+    if not results:
+        print("  No signals fired.")
+    else:
+        for signal, order in results:
+            order_str = f"  → order {order.broker_id} [{order.status}]" if order else "  → no order (market closed)"
+            print(f"  {signal}")
+            print(order_str)
+
+    # --- Positions ---
     print("\n=== Positions ===")
-    positions = connector.get_positions()
+    positions = oms.get_positions()
     if positions:
         for pos in positions:
-            print(f"  {pos.symbol}: {pos.qty} shares @ ${pos.avg_entry_price} | P&L: ${pos.unrealized_pl:.2f}")
+            print(f"  {pos.symbol:6} {pos.qty} @ ${pos.avg_entry_price}  P&L: ${pos.unrealized_pl:.2f}")
     else:
-        print("  No open positions")
-
-    print("\n=== Open Orders ===")
-    orders = connector.get_open_orders()
-    if orders:
-        for order in orders:
-            print(f"  {order.id}: {order.side.value} {order.qty} {order.symbol} [{order.status.value}]")
-    else:
-        print("  No open orders")
-
-    print("\n=== Latest Quote: AAPL ===")
-    quote = connector.get_latest_quote("AAPL")
-    print(f"  Bid: ${quote['bid_price']} x {quote['bid_size']}")
-    print(f"  Ask: ${quote['ask_price']} x {quote['ask_size']}")
-    print(f"  Time: {quote['timestamp']}")
-
-    print("\n=== Historical Bars: AAPL (last 5 days) ===")
-    bars = connector.get_bars("AAPL", timeframe="1Day", start="2025-05-01", limit=5)
-    for bar in bars:
-        print(f"  {bar.timestamp[:10]}  O:{bar.open}  H:{bar.high}  L:{bar.low}  C:{bar.close}  Vol:{bar.volume:,}")
-
-    # Uncomment to test a paper trade order:
-    # print("\n=== Placing Test Order ===")
-    # order = connector.place_order("AAPL", OrderSide.BUY, Decimal("1"), OrderType.MARKET)
-    # print(f"  Order placed: {order.id} [{order.status.value}]")
-    # connector.cancel_order(order.id)
-    # print(f"  Order cancelled")
+        print("  None")
 
 
 if __name__ == "__main__":

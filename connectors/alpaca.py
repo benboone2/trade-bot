@@ -4,6 +4,7 @@ from typing import Optional
 
 from alpaca.data.live import StockDataStream
 from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.enums import DataFeed
 from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.trading.client import TradingClient
@@ -239,6 +240,7 @@ class AlpacaConnector(BaseConnector):
             start=start,
             end=end,
             limit=limit,
+            feed=DataFeed.IEX,
         )
         bars_response = self._market_data.get_stock_bars(req)
         bars = bars_response[symbol] if symbol in bars_response else []
