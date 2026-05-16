@@ -243,7 +243,7 @@ class AlpacaConnector(BaseConnector):
             feed=DataFeed.IEX,
         )
         bars_response = self._market_data.get_stock_bars(req)
-        bars = bars_response[symbol] if symbol in bars_response else []
+        bars = bars_response[symbol] if symbol in bars_response.data else []
 
         return [
             Bar(
